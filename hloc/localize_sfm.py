@@ -150,6 +150,7 @@ def main(
     db_name_to_id = {img.name: i for i, img in reference_sfm.images.items()}
 
     config = {"estimation": {"ransac": {"max_error": ransac_thresh}}, **(config or {})}
+    print(f"Localization config:\n{config}")
     localizer = QueryLocalizer(reference_sfm, config)
 
     cam_from_world = {}

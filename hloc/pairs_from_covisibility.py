@@ -16,9 +16,12 @@ def main(model, output, num_matched):
     logger.info("Extracting image pairs from covisibility info...")
     pairs = []
     for image_id, image in tqdm(images.items()):
+        # np.array ！= -1 是NumPy的向量化比较操作，返回一个布尔数组，其中 ！= -1 的元素为 True
         matched = image.point3D_ids != -1
+        # 这是 NumPy 的一个核心功能，叫做布尔索引，会返回一个新的数组，这个新数组只包含原始数组中与 matched 数组中 True 值相对应的那些元素。
         points3D_covis = image.point3D_ids[matched]
 
+        # 找每个3d点的共视图像
         covis = defaultdict(int)
         for point_id in points3D_covis:
             for image_covis_id in points3D[point_id].image_ids:
