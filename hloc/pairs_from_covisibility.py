@@ -50,9 +50,16 @@ def main(model, output, num_matched):
             pairs.append(pair)
 
     logger.info(f"Found {len(pairs)} pairs.")
+    print(pairs[:10])
+    # Special-case output formatting for some pipelines that expect
+    # paths prefixed with `db/` (e.g. `pairs-ourdb-covis20.txt`).
+    out_name = Path(output).name
     with open(output, "w") as f:
-        f.write("\n".join(" ".join([i, j]) for i, j in pairs))
-
+        if out_name == "pairs-ourdb-covis20.txt":
+            # prepend `db/` to both entries per line
+            f.write("\n".join(f"db/{i} db/{j}" for i, j in pairs))
+        else:
+            f.write("\n".join(" ".join([i, j]) for i, j in pairs))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
