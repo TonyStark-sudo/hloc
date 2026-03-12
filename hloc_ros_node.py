@@ -2,6 +2,7 @@
 
 import os
 import sys
+import collections.abc as collections
 
 ros_package_path = '/opt/ros/noetic/lib/python3/dist-packages'
 if ros_package_path not in sys.path:
@@ -15,8 +16,51 @@ from cv_bridge import CvBridge
 import cv2
 import torch
 import pycolmap
-from hloc import extract_features, match_features
+import h5py
+import numpy as np
+from pathlib import Path
+from hloc import extract_features, match_features, pairs_from_retrieval
 from hloc.extract_features_one_frame import FeatureExtractor
+from hloc.pairs_from_retrieval_one_frame import pairs_from_retrieval_one_frame
+from hloc.utils.io import list_h5_names
+from hloc.utils.parsers import parse_image_lists
+
+def parse_names(prefix, names, names_all):
+    if prefix is not None:
+        if not isinstance(prefix, str):
+            prefix = tuple(prefix)
+        names = [n for n in names_all if n.startswith(prefix)]
+        if len(names) == 0:
+            raise ValueError(f"Could not find any image with the prefix `{prefix}`.")
+    elif names is not None:
+        if isinstance(names, (str, Path)):
+            names = parse_image_lists(names)
+        elif isinstance(names, collections.Iterable):
+            names = list(names)
+        else:
+            raise ValueError(
+                f"Unknown type of image list: {names}."
+                "Provide either a list or a path to a list file."
+            )
+    else:
+        names = names_all
+    return names
+
+
+def get_descriptors(names, path, name2idx=None, key="global_descriptor"):
+    if name2idx is None:
+        with h5py.File(str(path), "r", libver="latest") as fd:
+            desc = [fd[n][key].__array__() for n in names]
+    else: 
+        desc = []
+        # if path is not a list, wrap it in a list so indexing works
+        if isinstance(path, (str, Path)):
+            path = [path]
+            
+        for n in names:
+            with h5py.File(str(path[name2idx[n]]), "r", libver="latest") as fd:
+                desc.append(fd[n][key].__array__())
+    return torch.from_numpy(np.stack(desc, 0)).float()
 
 class HlocNode:
     def __init__(self):
@@ -37,13 +81,31 @@ class HlocNode:
         self.retrieval_extractor = FeatureExtractor(self.retrieval_conf, device)
 
         # load 3D-pointcloud-model
-        self.model_path = './outputs/ours/sfm_superpoint+superglue'
-        print(f"Loading 3D point cloud model from {self.model_path}...")
-        self.pointcloud_model = pycolmap.Reconstruction(self.model_path)
+        model_path = './outputs/ours/sfm_superpoint+superglue'
+        self.pointcloud_model = pycolmap.Reconstruction(model_path)
         if self.pointcloud_model.exists_point3D:
-            print("3D point cloud model loaded successfully.")
+            print("Loaded 3D point cloud model successfully.")
 
-        # 3D-pointcloud-model local and global feature
+        # Load 3D model features
+        feature_path = Path('./outputs/ours')
+        self.feature_path = feature_path
+        self.global_descriptors_path = feature_path / 'global-feats-netvlad.h5'
+        
+        if isinstance(self.global_descriptors_path, (Path, str)):
+            global_descriptors_path = [self.global_descriptors_path]
+        
+        name2db = {n: i for i, p in enumerate(global_descriptors_path) for n in list_h5_names(p)}
+        db_names_h5 = list(name2db.keys())
+        db_list = []
+        db_names = parse_names("db", db_list, db_names_h5)
+        if len(db_names) == 0:
+            raise ValueError("Could not find any database images.")
+
+        self.db_descs = get_descriptors(db_names, self.global_descriptors_path, name2db)
+        self.db_names = db_names
+        self.device = device
+        
+        print(f"Loaded {len(self.db_descs)} global descriptors from the database.")
         
         rospy.loginfo("HLoc node initialized, waiting for images...")
 
@@ -70,6 +132,21 @@ class HlocNode:
         rospy.loginfo(f"Extracted {num_kpts} SuperPoint keypoints.")
         rospy.loginfo(f"Extracted NetVLAD descriptor of size {desc_dim}.")
         
+        # Retrieval
+        if 'global_descriptor' in global_desc:
+            query_desc = global_desc['global_descriptor']
+            retrieval_pairs = pairs_from_retrieval_one_frame(
+                query_desc, 
+                self.db_names, 
+                self.db_descs, 
+                num_matched=20, 
+                device=self.device
+            )
+            
+            print(f"Found {len(retrieval_pairs)} retrieval pairs.")
+            if len(retrieval_pairs) > 0:
+                print(f"Top match: {retrieval_pairs[0]}")
+
         # Visualize keypoints
         if 'keypoints' in feats:
             kpts = feats['keypoints']
