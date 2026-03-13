@@ -21,6 +21,7 @@ import numpy as np
 from pathlib import Path
 from hloc import extract_features, match_features, pairs_from_retrieval
 from hloc.extract_features_one_frame import FeatureExtractor
+from hloc.match_features_one_frame import FeatureMatcher
 from hloc.pairs_from_retrieval_one_frame import pairs_from_retrieval_one_frame
 from hloc.utils.io import list_h5_names
 from hloc.utils.parsers import parse_image_lists
@@ -71,14 +72,18 @@ class HlocNode:
 
         # config
         self.feature_conf = extract_features.confs['superpoint_aachen']
+        self.matching_conf = match_features.confs['superglue']
         self.retrieval_conf = extract_features.confs['netvlad']
 
-        # load hloc-model
+        # load hloc-model superpoint
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f"Using device: {device}")
         
         self.feature_extractor = FeatureExtractor(self.feature_conf, device)
         self.retrieval_extractor = FeatureExtractor(self.retrieval_conf, device)
+
+        # load hloc-model superglue
+        self.feature_matcher = FeatureMatcher(self.matching_conf, device)
 
         # load 3D-pointcloud-model
         model_path = './outputs/ours/sfm_superpoint+superglue'
@@ -90,6 +95,7 @@ class HlocNode:
         feature_path = Path('./outputs/ours')
         self.feature_path = feature_path
         self.global_descriptors_path = feature_path / 'global-feats-netvlad.h5'
+        self.local_features_path = feature_path / 'feats-superpoint-n4096-r1024.h5'
         
         if isinstance(self.global_descriptors_path, (Path, str)):
             global_descriptors_path = [self.global_descriptors_path]
@@ -133,6 +139,7 @@ class HlocNode:
         rospy.loginfo(f"Extracted NetVLAD descriptor of size {desc_dim}.")
         
         # Retrieval
+        matched_kpts_indices = []
         if 'global_descriptor' in global_desc:
             query_desc = global_desc['global_descriptor']
             retrieval_pairs = pairs_from_retrieval_one_frame(
@@ -145,14 +152,57 @@ class HlocNode:
             
             print(f"Found {len(retrieval_pairs)} retrieval pairs.")
             if len(retrieval_pairs) > 0:
-                print(f"Top match: {retrieval_pairs[0]}")
+                # all matches
+                score_sum = 0
+                for pair in retrieval_pairs:
+                    score_sum += pair[1]
+                    print(f"Match: {pair}")
+                
+                avg_score = score_sum / len(retrieval_pairs)
+                print(f"Average retrieval score: {avg_score:.4f}")
 
+                if avg_score > 0.25:
+                    best_match = retrieval_pairs[0]
+                    db_name = best_match[0]
+                    print(f"Similar scene detected! Starting local matching with best match: {db_name}")
+                    
+                    with h5py.File(str(self.local_features_path), 'r') as fd:
+                        if db_name in fd:
+                            grp = fd[db_name]
+                            # Add image size (W, H) for matching normalization
+                            feats['image_size'] = np.array([cv_image.shape[1], cv_image.shape[0]])
+                            
+                            db_feats = {
+                                'keypoints': grp['keypoints'].__array__(),
+                                'scores': grp['scores'].__array__(),
+                                'descriptors': grp['descriptors'].__array__(),
+                                'image_size': grp['image_size'].__array__() if 'image_size' in grp else None
+                            }
+                            
+                            if 'scales' in grp:
+                                db_feats['scales'] = grp['scales'].__array__()
+                            
+                            matches, scores = self.feature_matcher(feats, db_feats)
+                            valid_matches_count = np.sum(matches > -1)
+                            rospy.loginfo(f"SuperGlue found {valid_matches_count} matches with {db_name}.")
+                            
+                            # Store indices for visualization
+                            matched_kpts_indices = np.where(matches > -1)[0]
+                        else:
+                            rospy.logwarn(f"Features for {db_name} not found in local features file.")
+
+                    
         # Visualize keypoints
         if 'keypoints' in feats:
             kpts = feats['keypoints']
             for kp in kpts:
                 cv2.circle(cv_image, (int(kp[0]), int(kp[1])), 3, (0, 255, 0), -1)
             
+            # Draw matched keypoints in Red and larger
+            for idx in matched_kpts_indices:
+                kp = kpts[idx]
+                cv2.circle(cv_image, (int(kp[0]), int(kp[1])), 4, (0, 0, 255), -1)
+
             try:
                 out_msg = self.bridge.cv2_to_imgmsg(cv_image, encoding="bgr8")
                 self.image_pub.publish(out_msg)
