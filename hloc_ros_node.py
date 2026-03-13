@@ -10,8 +10,8 @@ if ros_package_path not in sys.path:
 
 import rospy
 from sensor_msgs.msg import Image
+from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
-
 
 import cv2
 import torch
@@ -69,8 +69,16 @@ class HlocNode:
     def __init__(self):
         rospy.init_node('hloc_node', anonymous=True)
         self.bridge = CvBridge()
+        
+        # Configuration
+        self.enable_visualization = True # Check via param or hardcode
+        
         self.image_sub = rospy.Subscriber('/usb_camera/color/image_raw', Image, self.image_callback)
-        self.image_pub = rospy.Publisher('/usb_camera/color/image_with_keypoints', Image, queue_size=10)
+        if self.enable_visualization:
+            self.image_pub = rospy.Publisher('/usb_camera/color/image_with_keypoints', Image, queue_size=10)
+            self.match_pub = rospy.Publisher('/hloc/image_with_matches', Image, queue_size=10)
+            
+        self.pose_pub = rospy.Publisher('/hloc/pose', PoseStamped, queue_size=10)
 
         # config
         self.feature_conf = extract_features.confs['superpoint_aachen']
@@ -88,7 +96,7 @@ class HlocNode:
         self.feature_matcher = FeatureMatcher(self.matching_conf, device)
 
         # load 3D-pointcloud-model
-        model_path = './outputs/ours/sfm_superpoint+superglue'
+        model_path = './outputs/2026-02-28/sfm_superpoint+superglue'
         self.pointcloud_model = pycolmap.Reconstruction(model_path)
         if self.pointcloud_model.exists_point3D:
             print("Loaded 3D point cloud model successfully.")
@@ -101,7 +109,7 @@ class HlocNode:
         self.localizer = Localizer(self.pointcloud_model, self.pnp_config)
 
         # Load 3D model features
-        feature_path = Path('./outputs/ours')
+        feature_path = Path('./outputs/2026-02-28')
         self.feature_path = feature_path
         self.global_descriptors_path = feature_path / 'global-feats-netvlad.h5'
         self.local_features_path = feature_path / 'feats-superpoint-n4096-r1024.h5'
@@ -125,6 +133,8 @@ class HlocNode:
         rospy.loginfo("HLoc node initialized, waiting for images...")
 
     def image_callback(self, msg):
+        start_time = rospy.Time.now()
+        
         try:
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
@@ -198,6 +208,49 @@ class HlocNode:
                             # Store indices for visualization
                             matched_kpts_indices = np.where(matches > -1)[0]
                             
+                            # Visualization of matches
+                            if self.enable_visualization:
+                                # Get DB image for visualization if possible. 
+                                # Since we don't have the DB image file easily accessible (only features), 
+                                # we can only visualize on query image or need to load DB image from disk.
+                                # Assuming we have access to DB images at dataset path.
+                                # Let's try to assume dataset structure: dataset/ours/db/image_name
+                                try:
+                                    db_image_path = Path('datasets') / '2026-02-28' / db_name
+                                    if db_image_path.exists():
+                                        db_img_cv = cv2.imread(str(db_image_path))
+                                        if db_img_cv is not None:
+                                            # Draw matches
+                                            # Filter valid matches
+                                            valid = matches > -1
+                                            mkpts0 = feats['keypoints'][valid]
+                                            mkpts1 = db_feats['keypoints'][matches[valid]]
+                                            
+                                            # Use hloc or opencv to draw matches
+                                            # Let's use simple OpenCV drawMatches-like logic
+                                            h0, w0 = cv_image.shape[:2]
+                                            h1, w1 = db_img_cv.shape[:2]
+                                            
+                                            # Create a composite image
+                                            viz_h = max(h0, h1)
+                                            viz_w = w0 + w1
+                                            viz_img = np.zeros((viz_h, viz_w, 3), dtype=np.uint8)
+                                            viz_img[:h0, :w0] = cv_image
+                                            viz_img[:h1, w0:w0+w1] = db_img_cv
+                                            
+                                            for pt0, pt1 in zip(mkpts0, mkpts1):
+                                                pt1_shifted = (int(pt1[0] + w0), int(pt1[1]))
+                                                pt0_int = (int(pt0[0]), int(pt0[1]))
+                                                color = (0, 255, 0)
+                                                cv2.line(viz_img, pt0_int, pt1_shifted, color, 1)
+                                                cv2.circle(viz_img, pt0_int, 2, color, -1)
+                                                cv2.circle(viz_img, pt1_shifted, 2, color, -1)
+                                                
+                                            match_msg = self.bridge.cv2_to_imgmsg(viz_img, encoding="bgr8")
+                                            self.match_pub.publish(match_msg)
+                                except Exception as e:
+                                    rospy.logwarn(f"Match visualization failed: {e}")
+
                             # localization
                             if matches is not None and valid_matches_count > 100:
                                 # localization
@@ -214,6 +267,21 @@ class HlocNode:
                                     q = t.rotation.quat
                                     rospy.loginfo(f"Pose Translation: {tvec}")
                                     rospy.loginfo(f"Pose Rotation (quat w,x,y,z): {q}")
+                                    
+                                    # Publish PoseStamped
+                                    pose_msg = PoseStamped()
+                                    pose_msg.header.stamp = msg.header.stamp # Use image timestamp
+                                    pose_msg.header.frame_id = "map" # Assuming map frame
+                                    pose_msg.pose.position.x = tvec[0]
+                                    pose_msg.pose.position.y = tvec[1]
+                                    pose_msg.pose.position.z = tvec[2]
+                                    # pycolmap quaternion is (w, x, y, z)
+                                    pose_msg.pose.orientation.w = q[0]
+                                    pose_msg.pose.orientation.x = q[1]
+                                    pose_msg.pose.orientation.y = q[2]
+                                    pose_msg.pose.orientation.z = q[3]
+                                    self.pose_pub.publish(pose_msg)
+                                    
                                 else:
                                     if error_msg:
                                         rospy.logwarn(f"Localization failed: {error_msg}")
@@ -226,8 +294,10 @@ class HlocNode:
 
                     
         # Visualize keypoints
-        if 'keypoints' in feats:
+        if self.enable_visualization and 'keypoints' in feats:
             kpts = feats['keypoints']
+            # Only draw on copy to keep original clean if needed, 
+            # here cv_image is local and bridge converts it, so safe to draw.
             for kp in kpts:
                 cv2.circle(cv_image, (int(kp[0]), int(kp[1])), 3, (0, 255, 0), -1)
             
@@ -242,7 +312,10 @@ class HlocNode:
             except Exception as e:
                 rospy.logerr(f"CvBridge Publish Error: {e}")
         
-
+        end_time = rospy.Time.now()
+        duration = (end_time - start_time).to_sec()
+        rospy.loginfo(f"Frame processing time: {duration:.4f}s")
+        
 
 if __name__ == '__main__':
     node = HlocNode()
