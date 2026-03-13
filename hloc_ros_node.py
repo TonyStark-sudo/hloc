@@ -23,6 +23,8 @@ from hloc import extract_features, match_features, pairs_from_retrieval
 from hloc.extract_features_one_frame import FeatureExtractor
 from hloc.match_features_one_frame import FeatureMatcher
 from hloc.pairs_from_retrieval_one_frame import pairs_from_retrieval_one_frame
+from hloc.localize_sfm_one_frame import Localizer
+
 from hloc.utils.io import list_h5_names
 from hloc.utils.parsers import parse_image_lists
 
@@ -90,6 +92,13 @@ class HlocNode:
         self.pointcloud_model = pycolmap.Reconstruction(model_path)
         if self.pointcloud_model.exists_point3D:
             print("Loaded 3D point cloud model successfully.")
+            
+        # PnP config
+        self.pnp_config = {
+            "estimation": {"ransac": {"max_error": 12}},
+            "refinement": {}
+        }
+        self.localizer = Localizer(self.pointcloud_model, self.pnp_config)
 
         # Load 3D model features
         feature_path = Path('./outputs/ours')
@@ -188,6 +197,30 @@ class HlocNode:
                             
                             # Store indices for visualization
                             matched_kpts_indices = np.where(matches > -1)[0]
+                            
+                            # localization
+                            if matches is not None and valid_matches_count > 100:
+                                # localization
+                                # Prepare data for localization: (query_kpt_idx, db_3d_id)
+                                query_image_size = (cv_image.shape[1], cv_image.shape[0])
+                                
+                                ret, error_msg = self.localizer.localize(feats['keypoints'], matches, db_name, query_image_size)
+                                
+                                if ret is not None and 'cam_from_world' in ret:
+                                    # cam_from_world is a Rigid3d object (pycolmap)
+                                    t = ret['cam_from_world']
+                                    rospy.loginfo(f"Localization SUCCESS!")
+                                    tvec = t.translation
+                                    q = t.rotation.quat
+                                    rospy.loginfo(f"Pose Translation: {tvec}")
+                                    rospy.loginfo(f"Pose Rotation (quat w,x,y,z): {q}")
+                                else:
+                                    if error_msg:
+                                        rospy.logwarn(f"Localization failed: {error_msg}")
+                                    else:
+                                        rospy.logwarn("Localization PnP failed (returned None or no pose).")
+                            else:
+                                rospy.loginfo("Not enough matches for localization.")
                         else:
                             rospy.logwarn(f"Features for {db_name} not found in local features file.")
 
