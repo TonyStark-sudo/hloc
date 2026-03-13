@@ -96,7 +96,7 @@ class HlocNode:
         self.feature_matcher = FeatureMatcher(self.matching_conf, device)
 
         # load 3D-pointcloud-model
-        model_path = './outputs/2026-02-28/sfm_superpoint+superglue'
+        model_path = './outputs/ours/sfm_superpoint+superglue'
         self.pointcloud_model = pycolmap.Reconstruction(model_path)
         if self.pointcloud_model.exists_point3D:
             print("Loaded 3D point cloud model successfully.")
@@ -109,7 +109,7 @@ class HlocNode:
         self.localizer = Localizer(self.pointcloud_model, self.pnp_config)
 
         # Load 3D model features
-        feature_path = Path('./outputs/2026-02-28')
+        feature_path = Path('./outputs/ours')
         self.feature_path = feature_path
         self.global_descriptors_path = feature_path / 'global-feats-netvlad.h5'
         self.local_features_path = feature_path / 'feats-superpoint-n4096-r1024.h5'
@@ -216,7 +216,7 @@ class HlocNode:
                                 # Assuming we have access to DB images at dataset path.
                                 # Let's try to assume dataset structure: dataset/ours/db/image_name
                                 try:
-                                    db_image_path = Path('datasets') / '2026-02-28' / db_name
+                                    db_image_path = Path('datasets') / 'ours' / db_name
                                     if db_image_path.exists():
                                         db_img_cv = cv2.imread(str(db_image_path))
                                         if db_img_cv is not None:
@@ -231,20 +231,33 @@ class HlocNode:
                                             h0, w0 = cv_image.shape[:2]
                                             h1, w1 = db_img_cv.shape[:2]
                                             
-                                            # Create a composite image
-                                            viz_h = max(h0, h1)
-                                            viz_w = w0 + w1
-                                            viz_img = np.zeros((viz_h, viz_w, 3), dtype=np.uint8)
-                                            viz_img[:h0, :w0] = cv_image
-                                            viz_img[:h1, w0:w0+w1] = db_img_cv
+                                            # Create a composite image with padding
+                                            padding = 10
+                                            viz_h = max(h0, h1) + padding * 2
+                                            viz_w = w0 + w1 + padding * 3
+                                            viz_img = np.full((viz_h, viz_w, 3), 255, dtype=np.uint8) # White background
                                             
+                                            # Place images: Query Left, DB Right
+                                            viz_img[padding:padding+h0, padding:padding+w0] = cv_image
+                                            viz_img[padding:padding+h1, padding*2+w0:padding*2+w0+w1] = db_img_cv
+                                            
+                                            # Draw labels
+                                            font = cv2.FONT_HERSHEY_SIMPLEX
+                                            cv2.putText(viz_img, "Query Image", (padding, padding - 5), font, 0.5, (0, 0, 0), 1)
+                                            cv2.putText(viz_img, "Database Image", (padding*2 + w0, padding - 5), font, 0.5, (0, 0, 0), 1)
+                                            cv2.putText(viz_img, f"Matches: {valid.sum()}", (10, viz_h - 10), font, 0.5, (0, 0, 0), 1)
+                                            
+                                            # Draw borders
+                                            cv2.rectangle(viz_img, (padding, padding), (padding+w0, padding+h0), (0, 0, 0), 2)
+                                            cv2.rectangle(viz_img, (padding*2+w0, padding), (padding*2+w0+w1, padding+h1), (0, 0, 0), 2)
+
                                             for pt0, pt1 in zip(mkpts0, mkpts1):
-                                                pt1_shifted = (int(pt1[0] + w0), int(pt1[1]))
-                                                pt0_int = (int(pt0[0]), int(pt0[1]))
+                                                pt1_shifted = (int(pt1[0] + w0 + padding*2), int(pt1[1] + padding))
+                                                pt0_int = (int(pt0[0] + padding), int(pt0[1] + padding))
                                                 color = (0, 255, 0)
                                                 cv2.line(viz_img, pt0_int, pt1_shifted, color, 1)
-                                                cv2.circle(viz_img, pt0_int, 2, color, -1)
-                                                cv2.circle(viz_img, pt1_shifted, 2, color, -1)
+                                                cv2.circle(viz_img, pt0_int, 2, (0, 0, 255), -1)
+                                                cv2.circle(viz_img, pt1_shifted, 2, (0, 0, 255), -1)
                                                 
                                             match_msg = self.bridge.cv2_to_imgmsg(viz_img, encoding="bgr8")
                                             self.match_pub.publish(match_msg)
