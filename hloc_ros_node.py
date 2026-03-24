@@ -11,6 +11,7 @@ if ros_package_path not in sys.path:
 import rospy
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PointStamped
 from cv_bridge import CvBridge
 
 import cv2
@@ -71,7 +72,7 @@ class HlocNode:
         self.bridge = CvBridge()
         
         # Configuration
-        self.enable_visualization = True # Check via param or hardcode
+        self.enable_visualization = False # Check via param or hardcode
         
         self.image_sub = rospy.Subscriber('/usb_camera/color/image_raw', Image, self.image_callback)
         if self.enable_visualization:
@@ -79,6 +80,7 @@ class HlocNode:
             self.match_pub = rospy.Publisher('/hloc/image_with_matches', Image, queue_size=10)
             
         self.pose_pub = rospy.Publisher('/hloc/pose', PoseStamped, queue_size=10)
+        self.position_pub = rospy.Publisher('/hloc/position', PointStamped, queue_size=10)
 
         # config
         self.feature_conf = extract_features.confs['superpoint_aachen']
@@ -180,7 +182,7 @@ class HlocNode:
                 avg_score = score_sum / len(retrieval_pairs)
                 print(f"Average retrieval score: {avg_score:.4f}")
 
-                if avg_score > 0.25:
+                if avg_score > 0.15:
                     best_match = retrieval_pairs[0]
                     db_name = best_match[0]
                     print(f"Similar scene detected! Starting local matching with best match: {db_name}")
@@ -274,10 +276,15 @@ class HlocNode:
                                 
                                 if ret is not None and 'cam_from_world' in ret:
                                     # cam_from_world is a Rigid3d object (pycolmap)
-                                    t = ret['cam_from_world']
+                                    cam_from_world = ret['cam_from_world']
                                     rospy.loginfo(f"Localization SUCCESS!")
-                                    tvec = t.translation
-                                    q = t.rotation.quat
+                                    
+                                    # Convert to cam_to_world (camera pose in world frame)
+                                    cam_to_world = cam_from_world.inverse()
+                                    
+                                    tvec = cam_to_world.translation
+                                    q = cam_to_world.rotation.quat
+                                    
                                     rospy.loginfo(f"Pose Translation: {tvec}")
                                     rospy.loginfo(f"Pose Rotation (quat w,x,y,z): {q}")
                                     
@@ -294,7 +301,16 @@ class HlocNode:
                                     pose_msg.pose.orientation.y = q[2]
                                     pose_msg.pose.orientation.z = q[3]
                                     self.pose_pub.publish(pose_msg)
-                                    
+
+                                    # Publish PointStamped
+                                    position_msg = PointStamped()
+                                    position_msg.header.stamp = msg.header.stamp # Use image timestamp
+                                    position_msg.header.frame_id = "map" # Assuming map frame
+                                    position_msg.point.x = tvec[0]
+                                    position_msg.point.y = tvec[1]
+                                    position_msg.point.z = tvec[2]
+                                    self.position_pub.publish(position_msg)
+
                                 else:
                                     if error_msg:
                                         rospy.logwarn(f"Localization failed: {error_msg}")
