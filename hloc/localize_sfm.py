@@ -58,8 +58,15 @@ class QueryLocalizer:
     def localize(self, points2D_all, points2D_idxs, points3D_id, query_camera):
         points2D = points2D_all[points2D_idxs]
         points3D = [self.reconstruction.points3D[j].xyz for j in points3D_id]
+
+        if len(points2D) < 40:
+            logger.warning(
+                f"Not enough 2D-3D matches ({len(points2D)}) for {query_camera.camera_id}, skipping PnP."
+            )
+            return None
+
         ret = pycolmap.absolute_pose_estimation(
-            points2D,
+            points2D.astype(np.float64),
             points3D,
             query_camera,
             estimation_options=self.config.get("estimation", {}),

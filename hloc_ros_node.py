@@ -82,6 +82,10 @@ class HlocNode:
         self.pose_pub = rospy.Publisher('/hloc/pose', PoseStamped, queue_size=10)
         self.position_pub = rospy.Publisher('/hloc/position', PointStamped, queue_size=10)
 
+        # CSV output path for TUM-style pose records.
+        self.pose_csv_path = Path('~/output/hloc_pose.csv').expanduser()
+        self.pose_csv_path.parent.mkdir(parents=True, exist_ok=True)
+
         # config
         self.feature_conf = extract_features.confs['superpoint_aachen']
         self.matching_conf = match_features.confs['superglue']
@@ -98,7 +102,7 @@ class HlocNode:
         self.feature_matcher = FeatureMatcher(self.matching_conf, device)
 
         # load 3D-pointcloud-model
-        model_path = './outputs/ours/sfm_superpoint+superglue'
+        model_path = './outputs/2024-11-01/sfm_superpoint+superglue'
         self.pointcloud_model = pycolmap.Reconstruction(model_path)
         if self.pointcloud_model.exists_point3D:
             print("Loaded 3D point cloud model successfully.")
@@ -111,7 +115,7 @@ class HlocNode:
         self.localizer = Localizer(self.pointcloud_model, self.pnp_config)
 
         # Load 3D model features
-        feature_path = Path('./outputs/ours')
+        feature_path = Path('./outputs/2024-11-01')
         self.feature_path = feature_path
         self.global_descriptors_path = feature_path / 'global-feats-netvlad.h5'
         self.local_features_path = feature_path / 'feats-superpoint-n4096-r1024.h5'
@@ -218,7 +222,7 @@ class HlocNode:
                                 # Assuming we have access to DB images at dataset path.
                                 # Let's try to assume dataset structure: dataset/ours/db/image_name
                                 try:
-                                    db_image_path = Path('datasets') / 'ours' / db_name
+                                    db_image_path = Path('datasets') / '2024-11-01' / db_name
                                     if db_image_path.exists():
                                         db_img_cv = cv2.imread(str(db_image_path))
                                         if db_img_cv is not None:
@@ -310,6 +314,11 @@ class HlocNode:
                                     position_msg.point.y = tvec[1]
                                     position_msg.point.z = tvec[2]
                                     self.position_pub.publish(position_msg)
+
+                                    # Save in requested TUM-like CSV format: ts,x,y,0,0,0,0,0
+                                    ts = msg.header.stamp.to_sec()
+                                    with open(self.pose_csv_path, 'a', encoding='utf-8') as f:
+                                        f.write(f"{ts:.9f} {tvec[0]} {tvec[1]} 0 0 0 0 0\n")
 
                                 else:
                                     if error_msg:
