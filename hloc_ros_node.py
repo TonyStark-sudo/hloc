@@ -88,8 +88,8 @@ class HlocNode:
         self.pose_csv_path.parent.mkdir(parents=True, exist_ok=True)
 
         # config
-        self.feature_conf = extract_features.confs['superpoint_aachen']
-        self.matching_conf = match_features.confs['superglue']
+        self.feature_conf = extract_features.confs['sift']
+        self.matching_conf = match_features.confs['NN-ratio']
         self.retrieval_conf = extract_features.confs['netvlad']
 
         # load hloc-model superpoint
@@ -104,7 +104,7 @@ class HlocNode:
 
         # load 3D-pointcloud-model
         # model_path = './outputs/2026-02-28/sfm_superpoint+superglue_no_globalBA'
-        model_path = './outputs/2026-02-28/sfm_superpoint+superglue'
+        model_path = './outputs/2026-02-28/sfm_sift_light'
         self.pointcloud_model = pycolmap.Reconstruction(model_path)
         if self.pointcloud_model.exists_point3D:
             print("Loaded 3D point cloud model successfully.")
@@ -120,7 +120,7 @@ class HlocNode:
         feature_path = Path('./outputs/2026-02-28')
         self.feature_path = feature_path
         self.global_descriptors_path = feature_path / 'global-feats-netvlad.h5'
-        self.local_features_path = feature_path / 'feats-superpoint-n4096-r1024.h5'
+        self.local_features_path = feature_path / 'feats-sift.h5'
         
         if isinstance(self.global_descriptors_path, (Path, str)):
             global_descriptors_path = [self.global_descriptors_path]
