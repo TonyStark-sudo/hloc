@@ -3,6 +3,7 @@
 import os
 import sys
 import collections.abc as collections
+import time
 
 ros_package_path = '/opt/ros/noetic/lib/python3/dist-packages'
 if ros_package_path not in sys.path:
@@ -102,7 +103,8 @@ class HlocNode:
         self.feature_matcher = FeatureMatcher(self.matching_conf, device)
 
         # load 3D-pointcloud-model
-        model_path = './outputs/2024-11-01/sfm_superpoint+superglue'
+        # model_path = './outputs/2026-02-28/sfm_superpoint+superglue_no_globalBA'
+        model_path = './outputs/2026-02-28/sfm_superpoint+superglue'
         self.pointcloud_model = pycolmap.Reconstruction(model_path)
         if self.pointcloud_model.exists_point3D:
             print("Loaded 3D point cloud model successfully.")
@@ -115,7 +117,7 @@ class HlocNode:
         self.localizer = Localizer(self.pointcloud_model, self.pnp_config)
 
         # Load 3D model features
-        feature_path = Path('./outputs/2024-11-01')
+        feature_path = Path('./outputs/2026-02-28')
         self.feature_path = feature_path
         self.global_descriptors_path = feature_path / 'global-feats-netvlad.h5'
         self.local_features_path = feature_path / 'feats-superpoint-n4096-r1024.h5'
@@ -136,11 +138,21 @@ class HlocNode:
         
         print(f"Loaded {len(self.db_descs)} global descriptors from the database.")
         
+        self.frame_count = 0
+
+        self.total_local_extract_time = 0.0
+        self.total_global_extract_time = 0.0
+        self.total_global_match_time = 0.0
+        self.total_local_match_time = 0.0
+        self.total_pnp_time = 0.0
+        self.total_frame_time = 0.0
+        self.inner_points = 0
+
         rospy.loginfo("HLoc node initialized, waiting for images...")
 
     def image_callback(self, msg):
-        start_time = rospy.Time.now()
-        
+        import time
+        frame_start = time.perf_counter()
         try:
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
@@ -153,10 +165,18 @@ class HlocNode:
         rospy.loginfo("Received image, processing with HLoc...")
 
         # Extract features
+        t0 = time.perf_counter()
         feats = self.feature_extractor(cv_image)
+        local_extract_time = time.perf_counter() - t0
+
+        rospy.loginfo(f"Feature extraction took {local_extract_time * 1000:.4f} ms.")
         # Extract global descriptors
+        t0 = time.perf_counter()
         global_desc = self.retrieval_extractor(cv_image)
-        
+        global_extract_time = time.perf_counter() - t0
+
+        rospy.loginfo(f"Global descriptor extraction took {global_extract_time * 1000:.4f} ms.")
+
         num_kpts = feats['keypoints'].shape[0] if 'keypoints' in feats else 0
         desc_dim = global_desc['global_descriptor'].shape[0] if 'global_descriptor' in global_desc else 0
         
@@ -167,6 +187,7 @@ class HlocNode:
         matched_kpts_indices = []
         if 'global_descriptor' in global_desc:
             query_desc = global_desc['global_descriptor']
+            t0 = time.perf_counter()
             retrieval_pairs = pairs_from_retrieval_one_frame(
                 query_desc, 
                 self.db_names, 
@@ -174,7 +195,9 @@ class HlocNode:
                 num_matched=20, 
                 device=self.device
             )
-            
+            global_match_time = time.perf_counter() - t0
+            rospy.loginfo(f"Global Retrieval took {global_match_time * 1000:.4f} ms.")
+
             print(f"Found {len(retrieval_pairs)} retrieval pairs.")
             if len(retrieval_pairs) > 0:
                 # all matches
@@ -206,8 +229,11 @@ class HlocNode:
                             
                             if 'scales' in grp:
                                 db_feats['scales'] = grp['scales'].__array__()
-                            
+
+                            t0 = time.perf_counter()
                             matches, scores = self.feature_matcher(feats, db_feats)
+                            local_match_time = time.perf_counter() - t0
+                            rospy.loginfo(f"Local matching took {local_match_time * 1000:.4f} ms.")
                             valid_matches_count = np.sum(matches > -1)
                             rospy.loginfo(f"SuperGlue found {valid_matches_count} matches with {db_name}.")
                             
@@ -222,7 +248,7 @@ class HlocNode:
                                 # Assuming we have access to DB images at dataset path.
                                 # Let's try to assume dataset structure: dataset/ours/db/image_name
                                 try:
-                                    db_image_path = Path('datasets') / '2024-11-01' / db_name
+                                    db_image_path = Path('datasets') / '2026-02-28' / db_name
                                     if db_image_path.exists():
                                         db_img_cv = cv2.imread(str(db_image_path))
                                         if db_img_cv is not None:
@@ -276,13 +302,62 @@ class HlocNode:
                                 # Prepare data for localization: (query_kpt_idx, db_3d_id)
                                 query_image_size = (cv_image.shape[1], cv_image.shape[0])
                                 
+                                t0 = time.perf_counter()
                                 ret, error_msg = self.localizer.localize(feats['keypoints'], matches, db_name, query_image_size)
-                                
+
+                                localize_time = time.perf_counter() - t0
+                                rospy.loginfo(f"Localization took {localize_time * 1000:.4f} ms.")
+
                                 if ret is not None and 'cam_from_world' in ret:
                                     # cam_from_world is a Rigid3d object (pycolmap)
                                     cam_from_world = ret['cam_from_world']
                                     rospy.loginfo(f"Localization SUCCESS!")
-                                    
+
+                                    frame_time = time.perf_counter() - frame_start
+                                    self.frame_count += 1
+
+                                    self.total_local_extract_time += local_extract_time
+                                    self.total_global_extract_time += global_extract_time
+                                    self.total_global_match_time += global_match_time
+                                    self.total_local_match_time += local_match_time
+                                    self.total_pnp_time += localize_time
+                                    self.total_frame_time += frame_time
+                                    self.inner_points += valid_matches_count
+
+                                    rospy.loginfo("================ HLoc Timing ================")
+                                    rospy.loginfo(
+                                        f"Frame {self.frame_count}"
+                                    )
+                                    rospy.loginfo(
+                                        f"Local Feature Extract : {local_extract_time*1000:.2f} ms "
+                                        f"(Avg {self.total_local_extract_time/self.frame_count*1000:.2f} ms)"
+                                    )
+                                    rospy.loginfo(
+                                        f"Global Feature Extract: {global_extract_time*1000:.2f} ms "
+                                        f"(Avg {self.total_global_extract_time/self.frame_count*1000:.2f} ms)"
+                                    )
+                                    rospy.loginfo(
+                                        f"Global Retrieval      : {global_match_time*1000:.2f} ms "
+                                        f"(Avg {self.total_global_match_time/self.frame_count*1000:.2f} ms)"
+                                    )
+                                    rospy.loginfo(
+                                        f"Local Matching        : {local_match_time*1000:.2f} ms "
+                                        f"(Avg {self.total_local_match_time/self.frame_count*1000:.2f} ms)"
+                                    )
+                                    rospy.loginfo(
+                                        f"PnP Localization      : {localize_time*1000:.2f} ms "
+                                        f"(Avg {self.total_pnp_time/self.frame_count*1000:.2f} ms)"
+                                    )
+                                    rospy.loginfo(
+                                        f"Total Frame           : {frame_time*1000:.2f} ms "
+                                        f"(Avg {self.total_frame_time/self.frame_count*1000:.2f} ms)"
+                                    )
+                                    rospy.loginfo(
+                                        f"Inner Points          : {valid_matches_count} "
+                                        f"(Avg {self.inner_points/self.frame_count:.2f})"
+                                    )
+                                    rospy.loginfo("============================================")
+
                                     # Convert to cam_to_world (camera pose in world frame)
                                     cam_to_world = cam_from_world.inverse()
                                     
@@ -350,9 +425,6 @@ class HlocNode:
             except Exception as e:
                 rospy.logerr(f"CvBridge Publish Error: {e}")
         
-        end_time = rospy.Time.now()
-        duration = (end_time - start_time).to_sec()
-        rospy.loginfo(f"Frame processing time: {duration:.4f}s")
         
 
 if __name__ == '__main__':
